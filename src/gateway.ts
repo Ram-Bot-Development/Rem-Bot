@@ -11,7 +11,15 @@ export type GatewayDispatchPayload = {
   d?: unknown;
 };
 
-export type GatewayEventHandler = (event: GatewayDispatchPayload) => void;
+export type GatewayEventHandler = (
+  event: GatewayDispatchPayload,
+) => void | Promise<void>;
+
+/** Optional presence on IDENTIFY (activity + status). */
+export type BotPresenceConfig = {
+  status?: 'online' | 'idle' | 'dnd' | 'invisible';
+  activities?: Array<{ name: string; type: number }>;
+};
 
 /**
  * Minimal Discord Gateway v10 client: HELLO, IDENTIFY / RESUME, heartbeat, DISPATCH, reconnect.
@@ -19,6 +27,7 @@ export type GatewayEventHandler = (event: GatewayDispatchPayload) => void;
 export class DiscordGateway {
   private readonly token: string;
   private readonly intents: number;
+  private readonly presence?: BotPresenceConfig;
   private ws: WebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private sequence: number | null = null;
@@ -31,10 +40,12 @@ export class DiscordGateway {
     token: string,
     intents: number,
     onDispatch: GatewayEventHandler,
+    presence?: BotPresenceConfig,
   ) {
     this.token = token;
     this.intents = intents;
     this.onDispatch = onDispatch;
+    this.presence = presence;
   }
 
   connect(): void {
@@ -62,7 +73,12 @@ export class DiscordGateway {
       this.handlePayload(payload);
     });
 
-    ws.on('close', () => {
+    ws.on('close', (code: number) => {
+      if (code === 4014) {
+        console.error(
+          'Discord closed the Gateway (4014 Disallowed intents). Open the Developer Portal → your app → Bot → Privileged Gateway Intents and enable every intent your code requests (e.g. Server Members if member events are enabled). See https://discord.com/developers/docs/topics/gateway#list-of-intents',
+        );
+      }
       this.clearHeartbeat();
       if (!this.closed) {
         this.scheduleReconnect();
@@ -114,7 +130,9 @@ export class DiscordGateway {
             (d as { session_id: string }).session_id,
           );
         }
-        this.onDispatch(payload);
+        void Promise.resolve(this.onDispatch(payload)).catch((err: unknown) => {
+          console.error('Gateway dispatch handler error:', err);
+        });
         break;
       default:
         break;
@@ -122,17 +140,27 @@ export class DiscordGateway {
   }
 
   private identify(): void {
+    const d: Record<string, unknown> = {
+      token: this.token,
+      intents: this.intents,
+      properties: {
+        os: process.platform,
+        browser: gatewayClientLabel(),
+        device: gatewayClientLabel(),
+      },
+    };
+    if (this.presence != null) {
+      const { status = 'online', activities = [] } = this.presence;
+      d.presence = {
+        since: null,
+        activities,
+        status,
+        afk: false,
+      };
+    }
     this.send({
       op: 2,
-      d: {
-        token: this.token,
-        intents: this.intents,
-        properties: {
-          os: process.platform,
-          browser: gatewayClientLabel(),
-          device: gatewayClientLabel(),
-        },
-      },
+      d,
     });
   }
 
